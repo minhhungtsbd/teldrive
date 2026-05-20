@@ -1,6 +1,7 @@
 package services
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -8,6 +9,10 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"image"
+	_ "image/gif"  // register gif decoder
+	_ "image/jpeg" // register jpeg decoder
+	_ "image/png"  // register png decoder
 	"io"
 	"mime"
 	"path/filepath"
@@ -138,13 +143,18 @@ func (a *apiService) uploadToTelegram(ctx context.Context, client *tg.Client, ch
 		return nil, err
 	}
 
+	// For single-part, unencrypted images we buffer the stream once so we can
+	// decode width/height. Telegram clients use these dimensions to render an
+	// inline full-size preview instead of just a small thumbnail.
+	fileStream, imgW, imgH := detectImageDimensions(fileStream, params, fileSize, logger)
+
 	u := uploader.NewUploader(client).WithThreads(a.cnf.TG.Uploads.Threads).WithPartSize(512 * 1024)
 	upload, err := u.Upload(ctx, uploader.NewUpload(params.PartName, fileStream, fileSize))
 	if err != nil {
 		return nil, err
 	}
 
-	document := buildUploadedDocument(upload, params, fileSize, logger)
+	document := buildUploadedDocument(upload, params, fileSize, imgW, imgH, logger)
 	sender := message.NewSender(client)
 	target := sender.To(&tg.InputPeerChannel{ChannelID: channel.ChannelID, AccessHash: channel.AccessHash})
 
@@ -181,12 +191,15 @@ func (a *apiService) uploadToTelegram(ctx context.Context, client *tg.Client, ch
 // encrypted, we additionally:
 //   - Drop ForceFile so Telegram clients can render an inline preview.
 //   - Set the proper MIME type from the filename extension.
+//   - For images, attach DocumentAttributeImageSize so clients render a full
+//     inline preview instead of just a small thumbnail. The original file is
+//     preserved (no recompression) because we still upload as Document.
 //   - For videos, attach Video() attributes with SupportsStreaming so Telegram
 //     can stream the video without a full download.
 //
 // Encrypted parts and multi-part uploads always fall back to ForceFile(true)
 // because their bytes are not standalone playable media.
-func buildUploadedDocument(upload tg.InputFileClass, params *api.UploadsUploadParams, fileSize int64, logger *zap.Logger) message.MediaOption {
+func buildUploadedDocument(upload tg.InputFileClass, params *api.UploadsUploadParams, fileSize int64, imgW, imgH int, logger *zap.Logger) message.MediaOption {
 	doc := message.UploadedDocument(upload).Filename(params.PartName)
 
 	// Multi-part or encrypted uploads must always be plain files.
@@ -199,17 +212,13 @@ func buildUploadedDocument(upload tg.InputFileClass, params *api.UploadsUploadPa
 
 	switch cat {
 	case category.Image:
-		// Telegram has a hard 10 MB limit for inline photos; oversized images
-		// must still be sent as documents, but we keep ForceFile off and the
-		// MIME type set so clients can still preview them as image documents.
-		const tgPhotoLimit = 10 * 1024 * 1024
 		if mimeType != "" {
 			doc = doc.MIME(mimeType)
 		}
-		if fileSize > tgPhotoLimit {
-			logger.Debug("upload.image.oversize.fallback_document",
-				zap.Int64("size", fileSize),
-				zap.Int("limit", tgPhotoLimit))
+		// Attach width/height so Telegram renders a full inline preview.
+		// Without this attribute the client only shows a small thumbnail.
+		if imgW > 0 && imgH > 0 {
+			doc = doc.Attributes(&tg.DocumentAttributeImageSize{W: imgW, H: imgH})
 		}
 		return doc
 
@@ -228,6 +237,47 @@ func buildUploadedDocument(upload tg.InputFileClass, params *api.UploadsUploadPa
 	default:
 		return doc.ForceFile(true)
 	}
+}
+
+// detectImageDimensions reads the image header to obtain its width and height.
+// It only runs for single-part, unencrypted images and skips files larger than
+// imageProbeLimit to keep memory bounded. On any decode error or unsupported
+// format, it returns the original stream and zero dimensions, so the caller
+// can fall back to a regular document upload without a full preview.
+//
+// The function returns a new reader that contains the FULL original bytes,
+// because the bytes consumed for header parsing are buffered and replayed.
+func detectImageDimensions(src io.Reader, params *api.UploadsUploadParams, fileSize int64, logger *zap.Logger) (io.Reader, int, int) {
+	// Hard upper bound on bytes we are willing to buffer for image probing.
+	// Camera snapshots are usually a few hundred KB to a few MB; 20 MB is a
+	// safe ceiling that still covers typical phone photos.
+	const imageProbeLimit int64 = 20 * 1024 * 1024
+
+	if params.Encrypted.Value || params.PartName != params.FileName {
+		return src, 0, 0
+	}
+	if category.GetCategory(params.FileName) != category.Image {
+		return src, 0, 0
+	}
+	if fileSize <= 0 || fileSize > imageProbeLimit {
+		return src, 0, 0
+	}
+
+	buf, err := io.ReadAll(io.LimitReader(src, fileSize))
+	if err != nil {
+		logger.Debug("upload.image.probe.read_failed", zap.Error(err))
+		return src, 0, 0
+	}
+
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(buf))
+	if err != nil {
+		// Unsupported format (e.g. webp, heic) or malformed header. Fall back
+		// to a plain image document; we still replay the buffered bytes.
+		logger.Debug("upload.image.probe.decode_failed", zap.Error(err))
+		return bytes.NewReader(buf), 0, 0
+	}
+
+	return bytes.NewReader(buf), cfg.Width, cfg.Height
 }
 
 // mimeFromName returns the MIME type for the given filename based on its
