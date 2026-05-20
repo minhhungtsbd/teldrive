@@ -9,12 +9,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/tgdrive/teldrive/internal/api"
 	"github.com/tgdrive/teldrive/internal/auth"
+	"github.com/tgdrive/teldrive/internal/category"
 	"github.com/tgdrive/teldrive/internal/crypt"
 	"github.com/tgdrive/teldrive/internal/hash"
 	"github.com/tgdrive/teldrive/internal/logging"
@@ -141,7 +144,7 @@ func (a *apiService) uploadToTelegram(ctx context.Context, client *tg.Client, ch
 		return nil, err
 	}
 
-	document := message.UploadedDocument(upload).Filename(params.PartName).ForceFile(true)
+	document := buildUploadedDocument(upload, params, fileSize, logger)
 	sender := message.NewSender(client)
 	target := sender.To(&tg.InputPeerChannel{ChannelID: channel.ChannelID, AccessHash: channel.AccessHash})
 
@@ -167,6 +170,83 @@ func (a *apiService) uploadToTelegram(ctx context.Context, client *tg.Client, ch
 		return nil, fmt.Errorf("upload failed: invalid message ID 0 from telegram")
 	}
 	return message, nil
+}
+
+// buildUploadedDocument decides how to wrap the uploaded file before sending it
+// to Telegram. By default, files are sent with ForceFile(true) so they appear
+// as plain documents (this keeps download via GetLocation/MessageMediaDocument
+// working for every file).
+//
+// When a file is a single-part upload (PartName == FileName) and is NOT
+// encrypted, we additionally:
+//   - Drop ForceFile so Telegram clients can render an inline preview.
+//   - Set the proper MIME type from the filename extension.
+//   - For videos, attach Video() attributes with SupportsStreaming so Telegram
+//     can stream the video without a full download.
+//
+// Encrypted parts and multi-part uploads always fall back to ForceFile(true)
+// because their bytes are not standalone playable media.
+func buildUploadedDocument(upload tg.InputFileClass, params *api.UploadsUploadParams, fileSize int64, logger *zap.Logger) message.MediaOption {
+	doc := message.UploadedDocument(upload).Filename(params.PartName)
+
+	// Multi-part or encrypted uploads must always be plain files.
+	if params.Encrypted.Value || params.PartName != params.FileName {
+		return doc.ForceFile(true)
+	}
+
+	cat := category.GetCategory(params.FileName)
+	mimeType := mimeFromName(params.FileName)
+
+	switch cat {
+	case category.Image:
+		// Telegram has a hard 10 MB limit for inline photos; oversized images
+		// must still be sent as documents, but we keep ForceFile off and the
+		// MIME type set so clients can still preview them as image documents.
+		const tgPhotoLimit = 10 * 1024 * 1024
+		if mimeType != "" {
+			doc = doc.MIME(mimeType)
+		}
+		if fileSize > tgPhotoLimit {
+			logger.Debug("upload.image.oversize.fallback_document",
+				zap.Int64("size", fileSize),
+				zap.Int("limit", tgPhotoLimit))
+		}
+		return doc
+
+	case category.Video:
+		if mimeType == "" {
+			mimeType = message.DefaultVideoMIME
+		}
+		return doc.MIME(mimeType).Video().SupportsStreaming()
+
+	case category.Audio:
+		if mimeType == "" {
+			mimeType = message.DefaultAudioMIME
+		}
+		return doc.MIME(mimeType).Audio()
+
+	default:
+		return doc.ForceFile(true)
+	}
+}
+
+// mimeFromName returns the MIME type for the given filename based on its
+// extension. The charset and other media-type parameters are stripped so the
+// result is suitable for Telegram's MIME field. Returns an empty string if no
+// MIME type could be determined.
+func mimeFromName(name string) string {
+	ext := filepath.Ext(name)
+	if ext == "" {
+		return ""
+	}
+	mt := mime.TypeByExtension(ext)
+	if mt == "" {
+		return ""
+	}
+	if mediaType, _, err := mime.ParseMediaType(mt); err == nil {
+		return mediaType
+	}
+	return mt
 }
 
 func (a *apiService) UploadsUpload(ctx context.Context, req *api.UploadsUploadReqWithContentType, params api.UploadsUploadParams) (*api.UploadPart, error) {
