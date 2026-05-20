@@ -1,0 +1,29 @@
+# Build TelDrive from source.
+# Usage: docker build -f Dockerfile.build -t teldrive-custom:latest .
+
+FROM golang:1.23-alpine AS builder
+
+RUN apk add --no-cache git curl bash unzip ca-certificates \
+    && go install github.com/go-task/task/v3/cmd/task@latest
+
+WORKDIR /src
+
+# Cache Go modules
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy the rest of the source
+COPY . .
+
+# Generate API code, fetch UI assets, then build the server binary
+RUN /go/bin/task gen \
+    && /go/bin/task ui \
+    && /go/bin/task server
+
+# Final image: minimal scratch with only the binary and CA certs
+FROM gcr.io/distroless/static-debian12:nonroot
+
+COPY --from=builder /src/bin/teldrive /teldrive
+
+EXPOSE 8080
+ENTRYPOINT ["/teldrive", "run"]
