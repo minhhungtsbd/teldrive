@@ -51,7 +51,10 @@ func (s *MemoryBotSelector) Next(ctx context.Context, op BotOp, userID int64, bo
 	defer s.mu.Unlock()
 
 	key := selectorKey(op, userID)
-	idx := s.currIdx[key]
+	// The cached index can become stale if the bot list shrinks between calls
+	// (e.g. an admin removes a bot). Always normalize via modulo to avoid an
+	// out-of-range panic on bots[idx].
+	idx := s.currIdx[key] % len(bots)
 	s.currIdx[key] = (idx + 1) % len(bots)
 	return bots[idx], idx, nil
 }
