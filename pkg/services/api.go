@@ -2,12 +2,14 @@ package services
 
 import (
 	"context"
+	"crypto/subtle"
 	"fmt"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/go-faster/errors"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/gotd/td/telegram"
 	"github.com/ogen-go/ogen/ogenerrors"
 	"go.uber.org/zap"
@@ -23,6 +25,7 @@ import (
 	"github.com/tgdrive/teldrive/internal/utils"
 	"github.com/tgdrive/teldrive/internal/version"
 	"github.com/tgdrive/teldrive/pkg/models"
+	"github.com/tgdrive/teldrive/pkg/types"
 	"gorm.io/gorm"
 )
 
@@ -201,6 +204,10 @@ type extendedMiddleware struct {
 }
 
 func (m *extendedMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet && r.URL.Path == "/auth/static" {
+		m.srv.AuthStatic(w, r)
+		return
+	}
 	route, ok := m.next.FindRoute(r.Method, r.URL.Path)
 	if !ok {
 		m.next.ServeHTTP(w, r)
@@ -224,6 +231,56 @@ func (m *extendedMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	m.next.ServeHTTP(w, r)
+}
+
+func (e *extendedService) AuthStatic(w http.ResponseWriter, r *http.Request) {
+	key := r.URL.Query().Get("key")
+	if e.api.cnf.JWT.APIKey == "" || key == "" || subtle.ConstantTimeCompare([]byte(key), []byte(e.api.cnf.JWT.APIKey)) != 1 {
+		http.Error(w, "Unauthorized: Invalid or unconfigured API Key", http.StatusUnauthorized)
+		return
+	}
+
+	var session models.Session
+	var err error
+	if e.api.cnf.JWT.APIKeyUser != 0 {
+		err = e.api.db.Model(&models.Session{}).Where("user_id = ?", e.api.cnf.JWT.APIKeyUser).First(&session).Error
+	} else {
+		err = e.api.db.Model(&models.Session{}).First(&session).Error
+	}
+	if err != nil {
+		http.Error(w, "Internal Server Error: No active Telegram session found in database", http.StatusInternalServerError)
+		return
+	}
+
+	var user models.User
+	var name, userName string
+	if e.api.db.Model(&models.User{}).Where("user_id = ?", session.UserId).First(&user).Error == nil {
+		name = user.Name
+		userName = user.UserName
+	}
+
+	now := time.Now().UTC()
+	claims := &types.JWTClaims{
+		RegisteredClaims: jwt.RegisteredClaims{
+			Subject:   strconv.FormatInt(session.UserId, 10),
+			IssuedAt:  jwt.NewNumericDate(now),
+			ExpiresAt: jwt.NewNumericDate(now.Add(e.api.cnf.JWT.SessionTime)),
+		},
+		Name:      name,
+		UserName:  userName,
+		Hash:      session.Hash,
+	}
+
+	jwtToken, err := auth.Encode(e.api.cnf.JWT.Secret, claims)
+	if err != nil {
+		http.Error(w, "Internal Server Error: Failed to generate token", http.StatusInternalServerError)
+		return
+	}
+
+	cookieStr := setCookie(authCookieName, jwtToken, int(e.api.cnf.JWT.SessionTime.Seconds()))
+	w.Header().Set("Set-Cookie", cookieStr)
+
+	http.Redirect(w, r, "/", http.StatusFound)
 }
 
 func NewExtendedMiddleware(next *api.Server, srv *extendedService) *extendedMiddleware {
