@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"io"
@@ -803,25 +804,52 @@ func (e *extendedService) FilesStream(w http.ResponseWriter, r *http.Request, fi
 		user    *types.JWTClaims
 	)
 	if userId == 0 {
+		var token string
+		authHeader := r.Header.Get("Authorization")
+		if strings.HasPrefix(authHeader, "Bearer ") {
+			token = strings.TrimPrefix(authHeader, "Bearer ")
+		}
+		if token == "" {
+			token = r.Header.Get("X-API-Key")
+		}
+		if token == "" {
+			token = r.URL.Query().Get("token")
+		}
 
-		authHash := r.URL.Query().Get("hash")
-		if authHash == "" {
-			cookie, err := r.Cookie(authCookieName)
-			if err != nil {
-				http.Error(w, "missing token or authash", http.StatusUnauthorized)
-				return
+		if e.api.cnf.JWT.APIKey != "" && token != "" && subtle.ConstantTimeCompare([]byte(token), []byte(e.api.cnf.JWT.APIKey)) == 1 {
+			var sess models.Session
+			if e.api.cnf.JWT.APIKeyUser != 0 {
+				err = e.api.db.Model(&models.Session{}).Where("user_id = ?", e.api.cnf.JWT.APIKeyUser).First(&sess).Error
+			} else {
+				err = e.api.db.Model(&models.Session{}).First(&sess).Error
 			}
-			user, err = auth.VerifyUser(ctx, e.api.db, e.api.cache, e.api.cnf.JWT.Secret, cookie.Value)
-			if err != nil {
-				http.Error(w, "invalid token", http.StatusUnauthorized)
+			if err == nil {
+				session = &sess
+				userId = sess.UserId
 			}
-			userId, _ := strconv.ParseInt(user.Subject, 10, 64)
-			session = &models.Session{UserId: userId, Session: user.TgSession}
-		} else {
-			session, err = auth.GetSessionByHash(ctx, e.api.db, e.api.cache, authHash)
-			if err != nil {
-				http.Error(w, "invalid hash", http.StatusBadRequest)
-				return
+		}
+
+		if session == nil {
+			authHash := r.URL.Query().Get("hash")
+			if authHash == "" {
+				cookie, err := r.Cookie(authCookieName)
+				if err != nil {
+					http.Error(w, "missing token or authash", http.StatusUnauthorized)
+					return
+				}
+				user, err = auth.VerifyUser(ctx, e.api.db, e.api.cache, e.api.cnf.JWT.Secret, cookie.Value)
+				if err != nil {
+					http.Error(w, "invalid token", http.StatusUnauthorized)
+					return
+				}
+				userId, _ = strconv.ParseInt(user.Subject, 10, 64)
+				session = &models.Session{UserId: userId, Session: user.TgSession}
+			} else {
+				session, err = auth.GetSessionByHash(ctx, e.api.db, e.api.cache, authHash)
+				if err != nil {
+					http.Error(w, "invalid hash", http.StatusBadRequest)
+					return
+				}
 			}
 		}
 	} else {
