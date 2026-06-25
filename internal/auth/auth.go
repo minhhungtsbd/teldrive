@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"crypto/subtle"
 	"fmt"
 	"strconv"
 
@@ -110,6 +111,34 @@ func (s *securityHandler) HandleBearerAuth(ctx context.Context, operationName ap
 }
 
 func (s *securityHandler) handleAuth(ctx context.Context, token string) (context.Context, error) {
+	if s.cfg.APIKey != "" && subtle.ConstantTimeCompare([]byte(token), []byte(s.cfg.APIKey)) == 1 {
+		var session models.Session
+		var err error
+		if s.cfg.APIKeyUser != 0 {
+			err = s.db.Model(&models.Session{}).Where("user_id = ?", s.cfg.APIKeyUser).First(&session).Error
+		} else {
+			err = s.db.Model(&models.Session{}).First(&session).Error
+		}
+		if err == nil {
+			var user models.User
+			var name, userName string
+			if s.db.Model(&models.User{}).Where("user_id = ?", session.UserId).First(&user).Error == nil {
+				name = user.Name
+				userName = user.UserName
+			}
+			claims := &types.JWTClaims{
+				RegisteredClaims: jwt.RegisteredClaims{
+					Subject: strconv.FormatInt(session.UserId, 10),
+				},
+				Name:      name,
+				UserName:  userName,
+				Hash:      session.Hash,
+				TgSession: session.Session,
+			}
+			return context.WithValue(ctx, authKey, claims), nil
+		}
+	}
+
 	claims, err := VerifyUser(ctx, s.db, s.cache, s.cfg.Secret, token)
 	if err != nil {
 		return nil, &ogenerrors.SecurityError{Err: err}

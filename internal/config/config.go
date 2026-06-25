@@ -133,6 +133,8 @@ type JWTConfig struct {
 	Secret       string        `validate:"required" default:"" description:"JWT signing secret key"`
 	SessionTime  time.Duration `default:"30d" description:"JWT token validity duration"`
 	AllowedUsers []string      `default:"" description:"List of allowed usernames"`
+	APIKey       string        `default:"" description:"Static API Key for automation"`
+	APIKeyUser   int64         `default:"0" description:"User ID for the static API Key"`
 }
 
 type DBPool struct {
