@@ -1,91 +1,141 @@
-# Teldrive
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/tgdrive/teldrive)
+# Teldrive - Trình Quản Lý Tệp Tin Telegram VFS
 
-Teldrive is a powerful utility that enables you to organise your telegram files and much more.
+Teldrive là một ứng dụng mạnh mẽ được viết bằng Go, hoạt động như một hệ thống tệp ảo (VFS) phía trên tài khoản Telegram. Dự án này cho phép bạn lưu trữ, quản lý, chia sẻ và truyền phát (stream) tệp tin trực tiếp trên máy chủ Telegram thông qua giao diện Web thân thiện hoặc tích hợp Rclone.
 
-## Advantages Over Alternative Solutions
+Phiên bản này đã được tùy biến để hỗ trợ **Khóa API tĩnh vĩnh viễn (Static API Key)**, giúp tích hợp tự động hóa ổn định và đăng nhập giao diện Web không cần qua Telegram.
 
-- **Exceptional Speed:** Teldrive stands out among similar tools, thanks to its implementation in Go, a language known for its efficiency. Its performance surpasses alternatives written in Python and other languages, with the exception of Rust.
+---
 
-- **Enhanced Management Capabilities:** Teldrive not only excels in speed but also offers an intuitive user interface for efficient file interaction which other tool lacks. Its compatibility with Rclone further enhances file management.
+## 1. Hướng Dẫn Cài Đặt & Biên Dịch (Installation)
 
-> [!IMPORTANT]
-> Teldrive functions as a wrapper over your Telegram account, simplifying file access. However, users must adhere to the limitations imposed by the Telegram API. Teldrive is not responsible for any consequences arising from non-compliance with these API limits.You will be banned instantly if you misuse telegram API.
+Bạn có thể biên dịch trực tiếp Teldrive trên máy tính cá nhân/VPS hoặc sử dụng môi trường Docker cô lập.
 
-Visit https://teldrive-docs.pages.dev for setting up teldrive.
+### Cách 1: Biên dịch bằng Docker (Khuyên dùng cho VPS)
+Nếu VPS của bạn đã cài đặt Docker và bạn muốn biên dịch sạch sẽ mà không cần cài đặt Go trực tiếp:
+```bash
+# Di chuyển vào thư mục dự án
+cd ~/teldrive-src
 
-# Recognitions
+# Chạy container để tải giao diện, sinh API và biên dịch server
+docker run --rm -v "$PWD":/app -w /app golang:alpine sh -c "
+  apk add --no-cache git curl bash unzip &&
+  go install github.com/go-task/task/v3/cmd/task@latest &&
+  /go/bin/task gen &&
+  /go/bin/task ui &&
+  CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -o bin/teldrive
+"
+```
+Tệp chạy sau khi biên dịch sẽ nằm ở thư mục `~/teldrive-src/bin/teldrive`.
 
-<a href="https://trendshift.io/repositories/7568" target="_blank"><img src="https://trendshift.io/api/badge/repositories/7568" alt="divyam234%2Fteldrive | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
+### Cách 2: Biên dịch trực tiếp bằng Go (Yêu cầu Go >= 1.22)
+```bash
+# 1. Cài đặt các công cụ sinh mã tự động
+go generate ./...
 
-## Best Practices for Using Teldrive
-
-### Dos:
-
-- **Follow Limits:** Adhere to the limits imposed by Telegram servers to avoid account bans and automatic deletion of your channel.Your files will be removed from telegram servers if you try to abuse the service as most people have zero brains they will still do so good luck.
-- **Responsible Storage:** Be mindful of the content you store on Telegram. Utilize storage efficiently and only keep data that serves a purpose.
-  
-### Don'ts:
-- **Data Hoarding:** Avoid excessive data hoarding, as it not only violates Telegram's terms.
-  
-By following these guidelines, you contribute to the responsible and effective use of Telegram, maintaining a fair and equitable environment for all users.
-
-## Contributing
-
-Feel free to contribute to this project.See [CONTRIBUTING.md](CONTRIBUTING.md) for more information.
-
-## Donate
-
-If you like this project small contribution would be appreciated [Paypal](https://paypal.me/redux234).
-
-## Star History
-
-<a href="https://www.star-history.com/#tgdrive/teldrive&Date">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=tgdrive/teldrive&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=tgdrive/teldrive&type=Date" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=tgdrive/teldrive&type=Date" />
- </picture>
-</a>
-
-## Static API Key & Web UI Login Bypass
-
-Teldrive supports a permanent Static API Key for third-party integrations and Web UI login bypass without needing to authenticate via Telegram.
-
-### 1. Configuration (`config.toml`)
-Add the following fields under the `[jwt]` section:
-```toml
-[jwt]
-secret = "your-jwt-secret-key"
-session-time = "30d"
-api-key = "your-very-secure-static-api-key" # Define your static key here
-api-key-user = 0 # Telegram User ID to map, or 0 to automatically use the first session in the database
+# 2. Biên dịch server
+go build -o bin/teldrive main.go
 ```
 
-### 2. API Usage
-You can authenticate all Teldrive API requests (such as uploads, directory creation, file queries) using your Static API Key in one of the following ways:
-- **Header:** `Authorization: Bearer your-very-secure-static-api-key`
-- **Header:** `X-API-Key: your-very-secure-static-api-key`
-- **Query Parameter:** `?token=your-very-secure-static-api-key`
+---
 
-This enables permanent API access for scripts and external applications (e.g., video and image uploads) that do not support standard cookie-based sessions.
+## 2. Hướng Dẫn Cấu Hỏi & Cấu Hình (Configuration)
 
-### 3. HTML Streaming
-To embed or stream videos and images directly in HTML without sending authorization headers, append the `?token=` parameter to the file URL:
+Teldrive sử dụng một tệp cấu hình duy nhất ở định dạng TOML (mặc định đặt tại `/etc/teldrive/config.toml`).
+
+### Tạo Cơ Sở Dữ Liệu PostgreSQL
+Teldrive lưu trữ sơ đồ thư mục ảo trên PostgreSQL. Hãy chạy các lệnh sau trong PostgreSQL để chuẩn bị cơ sở dữ liệu:
+```sql
+CREATE DATABASE teldrive_db;
+CREATE USER teldrive_user WITH PASSWORD 'MatKhauCuaBan';
+GRANT ALL PRIVILEGES ON DATABASE teldrive_db TO teldrive_user;
+```
+
+### Cấu hình tệp `config.toml`
+Dưới đây là mẫu cấu hình cơ bản, bao gồm phần cấu hình **Static API Key**:
+
+```toml
+[server]
+port = 8080
+graceful-shutdown = '10s'
+
+[db]
+data-source = 'postgres://teldrive_user:MatKhauCuaBan@127.0.0.1:55432/teldrive_db?sslmode=disable'
+
+[jwt]
+secret = 'ma-secret-jwt-ngau-nhien-cua-ban'
+session-time = '30d'
+allowed-users = ["minhhungtsbdme"] # Whitelist người dùng Telegram được phép truy cập
+api-key = 'fall_detection_web_secure_api_key_2026' # Khóa API tĩnh tự chọn của bạn
+api-key-user = 0 # ID Telegram sở hữu session, để 0 để tự nhận diện session đầu tiên
+
+[tg]
+app-id = 2496 # Telegram App ID lấy từ my.telegram.org
+app-hash = '8da85b0d5bfe62527e5b244c209159c3' # Telegram App Hash
+auto-channel-create = true
+channel-limit = 500000
+
+[tg.session]
+type = 'postgres'
+key = 'session'
+```
+
+---
+
+## 3. Khóa API Tĩnh & Đăng Nhập Giao Diện Web (Static API Key & Bypass)
+
+Tính năng này giúp bạn tích hợp Teldrive với các hệ thống tự động hóa khác (như tải lên video/hình ảnh) và truy cập giao diện web mà không cần đăng nhập qua Telegram.
+
+### Xác thực API cho ứng dụng khách (Client Integration)
+Bạn có thể gọi bất kỳ API nào của Teldrive (tải lên, tạo thư mục, liệt kê tệp) bằng cách gửi kèm khóa API tĩnh thông qua 3 cách sau:
+1. **Authorization Header:** `Authorization: Bearer <api-key-tinh>`
+2. **X-API-Key Header:** `X-API-Key: <api-key-tinh>`
+3. **URL Parameter:** `?token=<api-key-tinh>`
+
+### Nhúng trực tuyến vào HTML (Streaming & Embed)
+Khi cần hiển thị ảnh hoặc phát video trực tiếp trên giao diện web của ứng dụng khác, hãy chèn tham số `?token=` vào đường dẫn tệp tin:
 ```html
-<!-- Embed an image -->
-<img src="http://your-teldrive:8080/api/files/file-id/image.jpg?token=your-very-secure-static-api-key" />
+<!-- Nhúng ảnh -->
+<img src="http://vps-ip:8080/api/files/id-file/anh.jpg?token=khoa_api_cua_ban" />
 
-<!-- Stream a video -->
+<!-- Phát video trực tuyến -->
 <video controls>
-  <source src="http://your-teldrive:8080/api/files/file-id/video.mp4?token=your-very-secure-static-api-key" type="video/mp4" />
+  <source src="http://vps-ip:8080/api/files/id-file/video.mp4?token=khoa_api_cua_ban" type="video/mp4">
 </video>
 ```
 
-### 4. Web UI Login Bypass
-To log in to the Teldrive Web UI on any browser without performing a Telegram login, visit the following URL in your browser:
+### Đăng nhập nhanh vào Web UI (Bypass Telegram Login)
+Để truy cập trang quản trị Web UI trên trình duyệt mới mà không cần xác thực qua Telegram, hãy truy cập đường dẫn sau:
 ```
-http://your-teldrive:8080/api/auth/static?key=your-very-secure-static-api-key
+http://<vps-ip>:8080/api/auth/static?key=<api-key-tinh>
 ```
-This endpoint will automatically verify the key, generate a valid session cookie, and redirect you to the Web UI dashboard logged in as the designated user.
+Hệ thống sẽ tự động xác thực khóa, cấp Cookie phiên làm việc và chuyển hướng bạn thẳng vào bảng điều khiển Web UI với tư cách là người dùng đã được cấu hình.
 
+---
+
+## 4. Quy Trình Cập Nhật Hệ Thống (Update)
+
+Mỗi khi có phiên bản mới hoặc thay đổi mã nguồn trên GitHub, bạn thực hiện quy trình cập nhật trên VPS theo các bước sau:
+
+```bash
+# 1. Vào thư mục và kéo mã nguồn mới nhất
+cd ~/teldrive-src
+git pull origin main
+
+# 2. Biên dịch lại tệp chạy bằng Docker
+docker run --rm -v "$PWD":/app -w /app golang:alpine sh -c "
+  apk add --no-cache git curl bash unzip &&
+  go install github.com/go-task/task/v3/cmd/task@latest &&
+  /go/bin/task gen &&
+  /go/bin/task ui &&
+  CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -o bin/teldrive
+"
+
+# 3. Thay thế tệp chạy của dịch vụ hệ thống
+systemctl stop teldrive
+cp ~/teldrive-src/bin/teldrive /usr/bin/teldrive
+chmod +x /usr/bin/teldrive
+
+# 4. Khởi động lại dịch vụ và kiểm tra nhật ký
+systemctl start teldrive
+journalctl -u teldrive -f
+```
